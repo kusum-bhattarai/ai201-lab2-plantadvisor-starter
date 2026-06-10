@@ -67,21 +67,49 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 
 #### Alias matching approach
 
-*Aliases are stored as a list of strings. How will you check if the normalized input matches any alias in the list? Write your approach in pseudocode or plain English.*
+For each plant, do a case-insensitive membership test of the normalized input
+against its `aliases` list. Lowercase every alias at compare time and test for
+exact equality, so `"Sansevieria"`, `"sansevieria"`, and `" sansevieria "`
+(already stripped by normalization) all match the same slug:
 
 ```
-[your answer here]
+match = any(normalized == alias.lower() for alias in plant["aliases"])
 ```
+
+**Why exact equality, not substring:** substring matching (`normalized in alias`)
+would cause false positives — e.g. `"aloe"` is a substring of nothing harmful here,
+but `"fig"` would match both "fiddle fig" and "banjo fig" unpredictably, and short
+inputs like `"ivy"` could match the wrong plant. Exact equality on a fully
+normalized string is the reliable choice for a curated database.
+
+**Scaling note:** this is an O(plants × aliases) linear scan. At ~15 plants that is
+fine. If the database grew to thousands of plants, I'd precompute a single reverse
+index `dict` once at module load — mapping every key, lowercased display name, and
+lowercased alias to its slug — turning each lookup into one O(1) dict access instead
+of a full scan. I'm not doing that now because it adds indexing complexity the
+current scale doesn't justify.
 
 ---
 
 #### Not-found message
 
-*When a plant isn't found, the agent will read your message and use it to decide what to tell the user. Write the exact string you'll return — make it useful to the agent, not just to a human reading logs.*
+The agent (LLM) reads this string and decides what to tell the user, so the message
+has to do two jobs: (1) state plainly that the plant is not in the curated database,
+and (2) give the agent the data it needs to respond well — namely the list of plants
+that *are* covered, so it can suggest a close match or pivot. It also tells the agent
+it may still offer general care guidance, while being honest that the advice is
+general rather than database-backed (so the agent doesn't fabricate database-specific
+detail). The exact string, built dynamically so it stays in sync with the database:
 
 ```
-[your answer here]
+f"No plant matching '{normalized}' was found in the plant database. The database "
+f"currently covers: {available}. If the user's plant is one of these under a "
+f"different name, use that entry; otherwise tell the user this specific plant "
+f"isn't in the curated database and offer general houseplant care guidance, making "
+f"clear the advice is general rather than from the database."
 ```
+
+where `available` is the comma-joined `display_name` of every plant in `_plant_db`.
 
 ---
 
@@ -91,17 +119,24 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 
 **Test: does `"devil's ivy"` return the pothos entry?**
 ```
-[yes / no — if no, describe what happened]
+Yes — {"found": True, "plant": {...full Pothos dict...}}. Matched via the alias
+branch (3rd in search order), since "devil's ivy" is in pothos["aliases"].
 ```
 
 **Test: does `"SNAKE PLANT"` return the snake plant entry?**
 ```
-[yes / no — if no, describe what happened]
+Yes — returns the Snake Plant dict. Normalization lowercases "SNAKE PLANT" to
+"snake plant", which matches plant["display_name"].lower() in the display-name branch.
 ```
 
 **One edge case you discovered while implementing:**
 ```
-[your answer here]
+The not-found contract returns "name": <normalized input>, but the original docstring
+said <original input>. I followed the spec contract and returned the normalized
+string, so the agent and any logs see the same value matching was actually done on.
+Also confirmed whitespace handling: "  pothos  " matches because .strip() runs before
+the O(1) key lookup — without the strip, the leading/trailing spaces would miss the
+exact key match entirely.
 ```
 
 ---
@@ -183,12 +218,14 @@ The full season dict from `_season_data`, plus a `detected_season` boolean. Exam
 
 **Test: does calling with `season=None` return the correct season for the current month?**
 ```
-Current month: [month]
-Expected season: [season]
-Returned season: [season]
+Current month: June (month 6)
+Expected season: summer (_MONTH_TO_SEASON[6] == "summer")
+Returned season: Summer — detected_season: True
 ```
 
 **Test: does calling with `season="winter"` return winter data regardless of the current month?**
 ```
-[yes / no]
+Yes — returns the Winter dict with detected_season: False (caller-specified, not
+auto-detected). Also verified that an invalid season like "monsoon" falls through to
+auto-detection (detected_season: True), as the VALID_SEASONS gate intends.
 ```
