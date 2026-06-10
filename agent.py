@@ -1,7 +1,7 @@
 import json
 from groq import Groq
 from config import GROQ_API_KEY, LLM_MODEL, MAX_TOOL_ROUNDS
-from tools import lookup_plant, get_seasonal_conditions
+from tools import lookup_plant, get_seasonal_conditions, find_mentioned_plants
 
 _client = Groq(api_key=GROQ_API_KEY)
 
@@ -173,17 +173,40 @@ def run_agent(user_message: str, history: list) -> str:
         # older Gradio uses "tuples" format ([user_msg, assistant_msg] pairs).
         # Handle both so the loop is correct across turns regardless of version.
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history_user_texts = []  # collected for conversation memory (see below)
         for entry in history:
             if isinstance(entry, dict):
                 # Messages format — already API-shaped; keep user/assistant turns.
                 if entry.get("role") in ("user", "assistant") and entry.get("content"):
                     messages.append({"role": entry["role"], "content": entry["content"]})
+                    if entry["role"] == "user":
+                        history_user_texts.append(entry["content"])
             else:
                 # Tuples format — [user_msg, assistant_msg].
                 user_msg, assistant_msg = entry
                 messages.append({"role": "user", "content": user_msg})
+                history_user_texts.append(user_msg)
                 if assistant_msg:
                     messages.append({"role": "assistant", "content": assistant_msg})
+
+        # Conversation memory: scan PRIOR user turns (not this one) for plants the
+        # user has mentioned, and tell the agent to connect advice to them when
+        # relevant. Recomputed each turn from history — no stored state. The note is
+        # appended to this turn's system message only; SYSTEM_PROMPT is never mutated.
+        remembered = []
+        for text in history_user_texts:
+            for name in find_mentioned_plants(text):
+                if name not in remembered:
+                    remembered.append(name)
+        if remembered:
+            messages[0]["content"] += (
+                "\n\nConversation memory — plants this user has mentioned earlier in "
+                "this conversation: " + ", ".join(remembered) + ". When it's relevant "
+                "to the current question, proactively connect your advice to these "
+                "plants (e.g. \"Since you mentioned you have a pothos, ...\"). Don't "
+                "force the connection if the new question is unrelated."
+            )
+
         messages.append({"role": "user", "content": user_message})
 
         # 2. Tool-calling loop, bounded by MAX_TOOL_ROUNDS so it can never run forever.

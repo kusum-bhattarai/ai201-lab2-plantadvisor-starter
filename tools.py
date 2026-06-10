@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 from config import DATA_PATH
 
@@ -18,6 +19,16 @@ _MONTH_TO_SEASON = {
     6: "summer", 7: "summer", 8: "summer",
     9: "fall",  10: "fall",  11: "fall",
 }
+
+# Precompute (word-boundary pattern, display_name) for every name a plant can be
+# referred to by — slug, display name, and aliases. Used by find_mentioned_plants()
+# to detect plant references embedded in free-form conversation text.
+_MENTION_PATTERNS = []
+for _key, _plant in _plant_db.items():
+    _names = {_key.replace("_", " "), _plant["display_name"].lower()}
+    _names.update(alias.lower() for alias in _plant["aliases"])
+    for _name in _names:
+        _MENTION_PATTERNS.append((re.compile(rf"\b{re.escape(_name)}\b"), _plant["display_name"]))
 
 
 def lookup_plant(plant_name: str) -> dict:
@@ -115,3 +126,20 @@ def get_seasonal_conditions(season: str | None = None) -> dict:
     result = dict(_season_data[season_key])
     result["detected_season"] = detected
     return result
+
+
+def find_mentioned_plants(text: str) -> list[str]:
+    """
+    Return the display names of every database plant referenced in `text`.
+
+    Powers conversation memory: scans free-form user text for any plant key, display
+    name, or alias as a whole word/phrase (word-boundary match, so a short alias can't
+    match the middle of an unrelated word). De-duplicated, returned in database order.
+    Returns [] when nothing matches. See specs/conversation-memory-spec.md.
+    """
+    lowered = text.lower()
+    found = []
+    for pattern, display_name in _MENTION_PATTERNS:
+        if display_name not in found and pattern.search(lowered):
+            found.append(display_name)
+    return found
