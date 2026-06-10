@@ -119,20 +119,46 @@ for tool_call in assistant_message.tool_calls:
 
 ### Loop termination conditions
 
-*The loop should stop when: (a) the LLM returns a response with no tool calls, OR (b) the MAX_TOOL_ROUNDS limit is reached. Describe how you will detect each condition and what you will return in each case.*
+The loop body runs at most `MAX_TOOL_ROUNDS` times — `for _ in range(MAX_TOOL_ROUNDS)`.
+The bounded counter is itself the guard against looping forever: even if the LLM keeps
+requesting tools (e.g. a tool returns an empty/unhelpful result and it retries), the
+loop cannot exceed the cap.
 
-```
-[your answer here]
-```
+(a) **No tool calls — normal exit.** After each LLM call, inspect
+`response.choices[0].message`. If `assistant_message.tool_calls` is falsy, the LLM has
+a final answer. Return `assistant_message.content or FALLBACK` — the `or` guard means a
+rare `None`/empty content never returns an empty string.
+
+(b) **MAX_TOOL_ROUNDS reached — graceful exit.** If the `for` loop completes without
+ever hitting the no-tool-calls branch, the agent is still asking for tools. Rather than
+return a stub or crash, make ONE final LLM call with no tools attached, forcing a text
+answer from the context already gathered, and return `content or FALLBACK`.
+
+**Failure modes handled:**
+- *Loop forever* → bounded `range(MAX_TOOL_ROUNDS)`.
+- *Returns empty string* → every return path uses `... or FALLBACK`; the post-loop call
+  also forces a text response so the cap-hit case isn't empty either.
+- *Raises an exception* (API error, `json.loads` on malformed tool arguments) → the whole
+  body is wrapped in try/except that logs and returns FALLBACK, honoring the contract that
+  the function never returns empty.
 
 ---
 
 ### Extracting the final text response
 
-*Once the loop exits because there are no more tool calls, how do you extract the text content from the response object? What field holds the string you should return?*
+The final text lives at `response.choices[0].message.content` — a `str`. Walk it down:
+`response.choices` is a list of completion choices; index `[0]` is the first (and, with
+default settings, only) one; `.message` is the assistant message object; `.content` is
+its text. This is the same `assistant_message` we already bound to check `.tool_calls`,
+so the access is just `assistant_message.content`.
 
-```
-[your answer here]
+Guard it with `or FALLBACK` when returning, because `content` is `None` whenever the
+assistant message carried `tool_calls` instead of text — on the no-tool-calls exit it
+will be a real string, but the guard keeps an unexpected `None`/`""` from ever being
+returned to the user.
+
+```python
+return assistant_message.content or FALLBACK
 ```
 
 ---
@@ -144,20 +170,42 @@ for tool_call in assistant_message.tool_calls:
 **Trace of a working agent turn (what tools were called and in what order):**
 
 ```
-Query: "How should I care for my calathea?"
-Round 1 tool call: [tool name, args]
-Round 2 tool call: [tool name, args] (if any)
-Final response: [brief description]
+Query: "How should I water my monstera this time of year?" (checkpoint query)
+Round 1 tool calls (same assistant message, executed in order):
+  1. lookup_plant({"plant_name": "monstera"})        -> found: True, full Monstera entry
+  2. get_seasonal_conditions({})                      -> Summer (auto-detected, June)
+Round 2: assistant message has no tool_calls -> loop exits, return content.
+Final response: Cites the monstera's specific watering (water when top 2 inches of
+  soil are dry, ~every 1–2 weeks) AND connects it to summer (water more frequently,
+  check soil every few days, watch for heat stress). Two tools, one round.
+
+Note: a plain "How do I care for my pothos?" calls only lookup_plant — the agent
+correctly skips the season tool when the question isn't season-specific.
 ```
 
 **What happens when you ask about a plant that isn't in the database?**
 
 ```
-[describe the behavior you observed]
+Asked "How should I care for my venus flytrap?". The agent calls
+lookup_plant({"plant_name": "Venus flytrap"}), which returns
+{"found": false, "name": "venus flytrap", "message": "...not found... database
+currently covers: <list>... offer general guidance, making clear it's general..."}.
+The LLM reads that message and responds honestly: states the venus flytrap isn't in
+the curated database, then offers general carnivorous-plant guidance. The not-found
+message did its job — it steered the agent's behavior, exactly as designed in the
+tool-functions spec.
 ```
 
 **One thing about the tool call API that surprised you:**
 
 ```
-[your answer here]
+Two things. (1) A no-argument tool call doesn't always arrive as "{}" — Groq sent
+get_seasonal_conditions's arguments as the JSON literal "null", so json.loads()
+returned None and dispatch_tool crashed on None.get("season"). I had to coerce args
+with `json.loads(arguments or "{}") or {}`. The loop owns argument robustness, not
+just the tools. (2) Llama-3.3 on Groq intermittently emits a tool call as malformed
+TEXT (<function=lookup_plant({...})</function>) instead of a structured tool_call,
+which the API rejects with a 400 tool_use_failed. It's non-deterministic — the same
+prompt fails ~half the time and succeeds on retry — so I added a targeted retry on
+that specific error to keep the app usable.
 ```
