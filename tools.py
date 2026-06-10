@@ -82,9 +82,10 @@ def lookup_plant(plant_name: str) -> dict:
             f"No plant matching '{normalized}' was found in the plant database. "
             f"The database currently covers: {available}. If the user's plant is "
             f"one of these under a different name, use that entry; otherwise tell "
-            f"the user this specific plant isn't in the curated database and offer "
-            f"general houseplant care guidance, making clear the advice is general "
-            f"rather than from the database."
+            f"the user this specific plant isn't in the curated database, identify "
+            f"the plant's general type (e.g. tropical, succulent, fern, cactus), and "
+            f"offer practical general care guidance for that type — without inventing "
+            f"specific database-style numbers, and making clear the advice is general."
         ),
     }
 
